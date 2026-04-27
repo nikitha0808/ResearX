@@ -7,6 +7,8 @@ A computer-use agent that reads latest arXiv papers on topics you care about, re
 
 You trigger a run by adding a list to a Trello board. The list name is the topic.
 
+> **Why this design.** Computer use earns its place where APIs don't exist, where the content is inherently visual, or where the agent's "hands" need to operate on a real UI — *not* as a substitute for APIs that already do the job. ResearX uses CU in exactly two places — hero-figure capture from a PDF and Miro idea-sticky placement on the canvas — and pointedly does *not* use it for arXiv search, synthesis, Trello, or Miro paper-circle layout. That separation is the demonstration.
+
 ---
 
 ## What it produces
@@ -143,8 +145,8 @@ python setup_miro_login.py
 The pipeline (LangGraph):
 
 ```
-search_arxiv → review_visual → find_figures → synthesize
-             → post_to_trello → post_to_miro
+search_arxiv → review_visual → find_hero_figure → synthesize_ideas
+             → post_to_trello → create_miro_board
 ```
 
 1. **`search_arxiv`** — arXiv API, last 365 days, sorted by relevance, top `SEARCH_MAX` candidates.
@@ -168,16 +170,29 @@ The system uses Anthropic's `computer_20251124` tool deliberately, only where vi
 | Paper review (full `computer_use` mode, opt-in) | Reading figures, ablation tables, architecture diagrams as visual content for the verdict itself — useful where visual reading materially changes the score. |
 | Miro idea placement | Placing each sticky at the visual midpoint of its source paper circles. Looking at the canvas and clicking where a person would. |
 
-CU is **not** used for things APIs do better — arXiv search, the verdict text in default mode (text extraction is enough for the rubric), synthesis (pure language), Trello, Miro paper circles + connectors. That separation is the system's design point.
+CU is **not** used for things APIs do better — arXiv search, the verdict text in default mode (text extraction is enough for the rubric), cross pollinating ideas from paper (pure language), Trello, Miro paper circles + connectors. That separation is the system's design point.
 
 ### Idempotency
 
 - Paper circles, idea stickies, and connectors are all deduped per board.
 - State (`.state/miro_state.json`) tracks Miro item IDs and is validated against the live board on each run, so deletions you make manually don't corrupt state.
-- Connectors are checked against existing pairs before being drawn; re-runs don't stack lines.
 
-### Failure modes
 
-- One paper's review crashing doesn't kill the topic — wrapped in `try/except`, the bad paper is dropped and the loop continues.
-- The Miro CU phase falls back to REST silently if anything goes sideways (set `MIRO_FALLBACK_TO_REST=0` to opt out).
-- Figure extraction returning `None` just means the Trello card has no cover image; everything else still posts.
+
+## Limitations & next steps
+
+**Known limitations**
+
+- **Miro CU sticky placement fails ~10% of the time** on dense boards — Sidekick popup, coordinate drift after auto-pan, missed double-click. The pipeline silently falls back to REST placement at the layout-computed convergence point, so the board still completes, but the visual narrative ("agent picks the spot") loses fidelity for that idea. While there are existing functions to retrieve the agent from these failure modes, using OPUS shows are tremendous improvement in the ideaboarding task.
+- **`find_figures` occasionally picks the wrong figure** when Figure 1 is a teaser plot and the real architecture is Figure 2. The fallback is a page-1 render, which usually still shows what the reader needs.
+- **Pipeline-mode review latency is bursty.** A single Claude call with 8 viewport screenshots takes 30-120 s on Sonnet, longer on Opus + Bedrock cross-region. The current log doesn't break out per-stage time, so a slow stage feels like a hang.
+- **No automated tests.** Verification is "did the run end with a board?". The pure functions (`compute_layout`, `cost_from_usage`, `arxiv_pdf_url`) are obvious targets for a smoke pytest suite.
+
+**Next steps (in priority order)**
+
+This system can be improved a lot! I'm listing down a few immediate possibilities.
+
+- **Pre-filter Research Papers**: An additional stage where extremely unworthy papers can be filtered using simpler techniques.
+- **Cross domain Ideaboards**: The present setup only ideates within a topic while a lot of innovation can be added by combining different topics.
+- **Improved reliable scaling**: cost effective scaling for constructing large boards with more than 10 papers.
+- **Human in the loop**: Shared trello boards and researchers being in the loop for ideation would be very cool.
