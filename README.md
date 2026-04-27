@@ -1,4 +1,4 @@
-# curator
+# ResearX
 
 A computer-use agent that reads new arXiv papers on topics you care about, reviews them like a top-conference reviewer, and turns the result into:
 
@@ -59,13 +59,7 @@ Where to find each:
 
 ### You don't create any boards by hand
 
-The `.env` keys above are the *only* thing you set up. Everything board-shaped is provisioned for you the first time it's needed:
-
-- **Trello board** — `main.py` looks up `TRELLO_BOARD_NAME` on your account at startup. If it doesn't exist, it creates it (empty, no default lists) and prints the URL.
-- **Per-topic Miro boards** — each Trello list you add is a topic, and each topic gets its own dedicated Miro board, created by the agent via `POST /v2/boards` the first time the topic runs. The board name = topic name. Re-running the same topic reuses the existing board (idempotent — see `.state/miro_state.json`).
-- **Miro login session** — on the first run, a Chromium window opens at miro.com for a one-time interactive login. Log in normally, return to the terminal, press Enter. The session is saved to `.miro_session.json` and reused. If it expires (cookies last a few weeks), refresh with `python setup_miro_login.py`.
-
-If a token is missing the right scope you'll see a 401 from the API on the first attempted call — Trello at startup, Miro on the first topic run.
+The `.env` keys above are the *only* thing you set up. The Trello board, per-topic Miro boards, and the Miro login session are all provisioned automatically on first run.
 
 ---
 
@@ -144,35 +138,6 @@ python setup_miro_login.py
 
 ---
 
-## Files
-
-```
-main.py             orchestrator (LangGraph nodes + Trello-poll loop)
-reviewer.py         paper review in 3 modes; reports figure bbox
-synthesize.py       cross-paper idea generation with novelty rating
-trello.py           paper card creation with figure cover (REST)
-miro/               Miro board package
-  __init__.py         dispatcher: post_topic_to_miro
-  config.py           env vars, layout/CU constants, file paths
-  state.py            .state/miro_state.json load/save + idea hashing
-  overlays.py         dismiss Sidekick / onboarding modals before CU
-  rest.py             REST API + spring layout + post_topic_via_rest
-  cu.py               CU sub-loops + the headline CU flow
-cu_agent.py         shared computer-use action substrate
-helpers.py          Claude client, pricing, PDF helpers, shared browser/page
-run_log.py          per-topic stdout/stderr tee → papers/runs/<ts>_<slug>.log
-setup_miro_login.py one-time Miro login → saved Playwright session
-```
-
-Pipeline state lives in `.state/` (gitignored — never committed):
-
-- **`.state/seen_lists.json`** — Trello list IDs already processed, so re-runs don't re-trigger.
-- **`.state/miro_state.json`** — per-topic Miro board IDs and per-board paper/idea item IDs. Re-runs reuse what's already there. Delete the file (or the whole `.state/` folder) to start fresh.
-
-The Playwright Miro login lives at `.miro_session.json` in the repo root (also gitignored) — kept separate because it's a credential, not pipeline state.
-
----
-
 ## How it works
 
 The pipeline (LangGraph):
@@ -216,13 +181,3 @@ CU is **not** used for things APIs do better — arXiv search, the verdict text 
 - One paper's review crashing doesn't kill the topic — wrapped in `try/except`, the bad paper is dropped and the loop continues.
 - The Miro CU phase falls back to REST silently if anything goes sideways (set `MIRO_FALLBACK_TO_REST=0` to opt out).
 - Figure extraction returning `None` just means the Trello card has no cover image; everything else still posts.
-
----
-
-## Why this exists
-
-In an interview I was asked to design a computer-use agent that schedules meetings. I didn't have a strong mental model of CU at the time and my answer was hand-wavy. Working on this afterward, the thing that clicked for me — and that this project deliberately demonstrates — is:
-
-> **Computer use earns its place where APIs don't exist, where the content is inherently visual, or where the agent's "hands" need to operate on a real UI. It doesn't earn its place as a substitute for APIs that already do the job better.**
-
-The pipeline has CU agents in two places (paper review, Miro idea placement) and pointedly does *not* use CU in four others (arXiv, synthesis, Trello, Miro paper layout). That's the demonstration.
