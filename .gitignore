@@ -1,0 +1,27 @@
+# ── Secrets / session state (NEVER commit) ─────────────────────────────────
+.env
+# live Miro auth cookies (saved Playwright session)
+.miro_session.json
+
+# ── Per-run state (private to your account / accumulates locally) ──────────
+# .state/ holds miro_state.json (per-topic Miro board IDs + cached item IDs)
+# and seen_lists.json (Trello list IDs already processed).
+.state/
+
+# ── Generated / runtime artifacts ──────────────────────────────────────────
+# JSONL logs, per-run logs, downloaded figures
+papers/
+# atomic-write leftovers from save_state / save_seen
+*.tmp
+
+# ── Python ─────────────────────────────────────────────────────────────────
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# ── OS / editor ────────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
