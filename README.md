@@ -1,9 +1,9 @@
 # ResearX
 
-A computer-use agent that reads new arXiv papers on topics you care about, reviews them like a top-conference reviewer, and turns the result into:
+A computer-use agent that reads latest arXiv papers on topics you care about, reviews them like a top-conference reviewer, and turns the result into:
 
-- a **Trello list** of papers to read, each card cover showing the paper's main architecture figure, and
-- a **Miro board** that grows over time — papers as colored circles, idea sticky notes between them connected by thick lines.
+- a **Trello list** of papers to read with the main architecture and a summary, and
+- a **Miro board** for storyboarding ideas that grows over time — papers as colored circles, idea sticky notes between them connected by thick lines.
 
 You trigger a run by adding a list to a Trello board. The list name is the topic.
 
@@ -25,7 +25,7 @@ You trigger a run by adding a list to a Trello board. The list name is the topic
 - Thick connectors fan out from each source paper to the ideas it contributed to.
 - Re-running the same topic adds new ideas; existing items are reused, not duplicated.
 
-![Sample Miro board produced by the agent](miro_sample.png)
+![Sample Miro board produced by the agent](miro_sample_board.jpg)
 
 ---
 
@@ -97,7 +97,7 @@ A Chromium window opens. Each task runs in a new tab inside the same window. The
 
 Stop with Ctrl+C. The script just polls; killing it is safe.
 
-**Cost per topic** (default settings, `claude-sonnet-4-6`): ~$2–$5. Switching to `claude-opus-4-7` is ~5× that.
+**Cost per topic** (default settings, `claude-sonnet-4-6`): ~$1–$2.
 
 ---
 
