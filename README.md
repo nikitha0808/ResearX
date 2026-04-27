@@ -149,8 +149,8 @@ search_arxiv → review_visual → find_hero_figure → synthesize_ideas
              → post_to_trello → create_miro_board
 ```
 
-1. **`search_arxiv`** — arXiv API, last 365 days, sorted by relevance, top `SEARCH_MAX` candidates.
-2. **`review_visual`** — per paper, in the default `pipeline` mode: one Claude call with N viewport screenshots of the rendered PDF returns the structured NeurIPS-style review and a normalized bbox for the architecture figure. Threshold filter; top `KEEP_TOP` survive. (Other modes: `computer_use` runs the full CU agent loop; `text` does PyMuPDF text extraction with no vision.)
+1. **`search_arxiv`** — arXiv API, last 365 days, sorted by relevance, top `SEARCH_MAX` candidates. It can later be converted to a daily cron job to add more papers to the reading list.
+2. **`review_visual`** — per paper, in the default `pipeline` mode: one Claude call with N viewport screenshots of the rendered PDF returns the structured NeurIPS-style review. (Other modes: `computer_use` runs the full CU agent loop; `text` does PyMuPDF text extraction with no vision.)
 3. **`find_figures`** — for each kept paper that doesn't already have a figure (i.e., when `text` mode was used), a small bounded CU sub-loop scrolls the rendered PDF, identifies the main architecture figure, and reports its page index + normalized bbox. We render that page at high DPI and crop to the bbox to produce the thumbnail. Skipped via `FIND_FIGURES_ENABLED=0`.
 4. **`synthesize`** — one Claude call. Reads all kept reviews; proposes 1–3 cross-paper ideas, each citing ≥2 source papers, with a calibrated `novelty_rating` (1–10).
 5. **`post_to_trello`** — paper cards with the review-form description and the cropped figure as cover image.
