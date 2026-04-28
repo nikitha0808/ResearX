@@ -7,7 +7,7 @@ A computer-use agent that reads latest arXiv papers on topics you care about, re
 
 You trigger a run by adding a list to a Trello board. The list name is the topic.
 
-> **Why this design.** Computer use earns its place where APIs don't exist, where the content is inherently visual, or where the agent's "hands" need to operate on a real UI — *not* as a substitute for APIs that already do the job. ResearX uses CU in exactly two places — hero-figure capture from a PDF and Miro idea-sticky placement on the canvas — and pointedly does *not* use it for arXiv search, synthesis, Trello, or Miro paper-circle layout. That separation is the demonstration.
+> **Why this design.** Computer use is an ideal tool where APIs don't exist, where the content is inherently visual, or where the agent's "hands" need to operate on a real UI. ResearX uses CU in exactly two places — hero-figure capture from a PDF and Miro idea-sticky placement on the canvas — and pointedly does *not* use it for arXiv search or ideation. This repo combines REST APIs with Anthropic's CU tool to orchestrate a curation agent.
 
 ---
 
@@ -168,7 +168,7 @@ The system uses Anthropic's `computer_20251124` tool deliberately, only where vi
 |---|---|
 | Hero figure capture (`find_figures` step, default) | Visually identifying which figure is the architecture diagram and reporting its page+bbox so we can crop it tightly. PyMuPDF text extraction can't tell which figure to crop; you need eyes on the page. |
 | Paper review (full `computer_use` mode, opt-in) | Reading figures, ablation tables, architecture diagrams as visual content for the verdict itself — useful where visual reading materially changes the score. |
-| Miro idea placement | Placing each sticky at the visual midpoint of its source paper circles. Looking at the canvas and clicking where a person would. |
+| Miro idea placement (only experimental) | Placing each sticky at the visual midpoint of its source paper circles. Looking at the canvas and clicking where a person would. | 
 
 CU is **not** used for things APIs do better — arXiv search, the verdict text in default mode (text extraction is enough for the rubric), cross pollinating ideas from paper (pure language), Trello, Miro paper circles + connectors. That separation is the system's design point.
 
