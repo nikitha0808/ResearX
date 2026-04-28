@@ -75,8 +75,8 @@ python main.py
 You'll see:
 
 ```
-Baselined N existing lists on 'Papers Arena'.
-Watching 'Papers Arena' every 30s. Ctrl+C to stop.
+Baselined N existing lists on '<Board Name>'.
+Watching '<Board Name>' every 30s. Ctrl+C to stop.
 ```
 
 To trigger a pipeline run, open your Trello board and add a new list. Type a topic (e.g. `mechanistic interpretability`) and hit Enter. Within 30 seconds the script picks it up:
@@ -87,6 +87,10 @@ New list detected: 'mechanistic interpretability' — running pipeline…
   [1/8] reviewing: <paper title>…
     ACCEPT — rating 8/10, soundness 4/4, contribution 3/4 ($0.6, 95s)
   …
+  finding main figure for 4 paper(s) via CU…
+  [1/4] figure: <paper title>
+    captured ($0.05, 14s, 7 screenshots)
+  …
   → 2 idea(s) proposed
   -> posted 4 paper card(s)
   [Miro CU] phase 1: pre-flight cleanup analysis…
@@ -94,8 +98,6 @@ New list detected: 'mechanistic interpretability' — running pipeline…
   [Miro CU] phase 3: CU placing 2 idea sticky(s) at convergence points…
   [Miro CU] phase 4: drew 8 connector(s)
 ```
-
-A Chromium window opens. Each task runs in a new tab inside the same window. The window stays open for the duration of the topic.
 
 Stop with Ctrl+C. The script just polls; killing it is safe.
 
@@ -113,9 +115,11 @@ Set in `.env` or inline (`VAR=value python main.py`).
 | `REVIEWER_MODEL` | `$CLAUDE_MODEL` | Model used by the per-paper reviewer (CU / pipeline / text modes). |
 | `SYNTHESIZE_MODEL` | `$CLAUDE_MODEL` | Model used for the cross-paper ideation call. |
 | `MIRO_CU_MODEL` | `$CLAUDE_MODEL` | Model used by the Miro CU agent. Miro's web UI is the hardest visual task in the pipeline, so consider overriding to `claude-opus-4-7` for higher reliability. |
-| `REVIEWER_MODE` | `pipeline` | `pipeline` (default — one Claude call with N viewport screenshots; submit_review returns the figure bbox) / `computer_use` (full CU agent reads the PDF visually) / `text` (PyMuPDF text extraction, no vision; hero figure is captured separately by the `find_figures` step) |
+| `REVIEWER_MODE` | `pipeline` | `pipeline` (default — one Claude call with N viewport screenshots) / `computer_use` (full CU agent reads the PDF visually) / `text` (PyMuPDF text extraction, no vision). Figure extraction is a separate step downstream and runs regardless of mode. |
+| `FIGURE_FINDER_MODEL` | `$CLAUDE_MODEL` | Model used by the `find_figures` CU agent. |
 | `FIND_FIGURES_ENABLED` | `1` | When `1`, the `find_figures` step runs a bounded CU sub-loop on each kept paper to capture its architecture diagram. Set to `0` to skip and post papers without thumbnails. |
-| `FIGURE_FINDER_MAX_STEPS` | `6` | CU sub-loop turn budget for the figure finder. |
+| `FIGURE_FINDER_MAX_STEPS` | `8` | CU sub-loop turn budget for the figure finder. |
+| `FIGURE_CROP_DPI` | `180` | DPI used when rendering the bbox crop. Higher = sharper thumbnail, larger bytes. |
 | `SEARCH_MAX` | `8` | arXiv candidates fetched per topic. |
 | `KEEP_TOP` | `4` | Max papers kept after review threshold. |
 | `MIN_RATING` / `MIN_SOUNDNESS` / `MIN_CONTRIBUTION` | `7 / 3 / 3` | Thresholds a paper must clear to be kept. |
@@ -130,9 +134,12 @@ Set in `.env` or inline (`VAR=value python main.py`).
 ## Standalone debug commands
 
 ```bash
-# Review a single paper end-to-end (no Trello/Miro). Prints the JSON review
-# and saves the cropped figure to /tmp/review_figure.png.
+# Review a single paper end-to-end (no Trello/Miro). Prints the JSON review.
 python reviewer.py 1706.03762
+
+# Run only the figure-extraction CU agent on one paper. Saves the crop to
+# /tmp/figure.png by default, or to the path you pass.
+python find_figures.py 1706.03762 /tmp/figure.png
 
 # Refresh the Miro session if cookies expired.
 python setup_miro_login.py
@@ -142,35 +149,29 @@ python setup_miro_login.py
 
 ## How it works
 
-The pipeline (LangGraph):
-
 ```
-search_arxiv → review_visual → find_hero_figure → synthesize_ideas
-             → post_to_trello → create_miro_board
+search_arxiv → review_visual → find_figures → synthesize
+             → post_to_trello → post_to_miro
 ```
 
-1. **`search_arxiv`** — arXiv API, last 365 days, sorted by relevance, top `SEARCH_MAX` candidates. It can later be converted to a daily cron job to add more papers to the reading list.
-2. **`review_visual`** — per paper, in the default `pipeline` mode: one Claude call with N viewport screenshots of the rendered PDF returns the structured NeurIPS-style review. (Other modes: `computer_use` runs the full CU agent loop; `text` does PyMuPDF text extraction with no vision.)
-3. **`find_figures`** — for each kept paper that doesn't already have a figure (i.e., when `text` mode was used), a small bounded CU sub-loop scrolls the rendered PDF, identifies the main architecture figure, and reports its page index + normalized bbox. We render that page at high DPI and crop to the bbox to produce the thumbnail. Skipped via `FIND_FIGURES_ENABLED=0`.
-4. **`synthesize`** — one Claude call. Reads all kept reviews; proposes 1–3 cross-paper ideas, each citing ≥2 source papers, with a calibrated `novelty_rating` (1–10).
-5. **`post_to_trello`** — paper cards with the review-form description and the cropped figure as cover image.
-6. **`post_to_miro`**:
-   - REST creates one colored circle per paper at NetworkX spring-layout coordinates (connected papers cluster, edge crossings minimized).
-   - A CU pre-flight pass scans the board and deletes any stale leftovers from prior runs.
-   - CU places one yellow sticky per idea, between its source paper circles, including the novelty rating in the content.
-   - REST draws thick connectors from each source paper to the ideas it contributed to.
+1. **`search_arxiv`** — arXiv API, last 365 days, top `SEARCH_MAX` by relevance.
+2. **`review_visual`** — one Claude call per paper. Default `pipeline` mode sends N viewport screenshots; `computer_use` runs a full CU loop; `text` uses PyMuPDF extraction with no vision.
+3. **`find_figures`** — bounded CU loop per kept paper: agent scrolls, identifies the architecture figure, reports `(page_index, bbox)` via `report_figure`. PyMuPDF crops the page at `FIGURE_CROP_DPI`. Falls back to a page-1 render if no figure is found.
+4. **`synthesize`** — one Claude call across all kept reviews; proposes 1–3 cross-paper ideas, each with ≥2 sources and a `novelty_rating` (1–10).
+5. **`post_to_trello`** — one card per paper, review-form description, cropped figure as cover.
+6. **`post_to_miro`** — REST places paper circles at spring-layout coords; CU cleanup pass removes stale items; CU places idea stickies between their source circles; REST draws connectors.
 
-### Where computer-use earns its place
+### Where computer-use makes sense
 
 The system uses Anthropic's `computer_20251124` tool deliberately, only where vision + UI is doing real work:
 
 | Where CU runs | What it's actually doing |
 |---|---|
-| Hero figure capture (`find_figures` step, default) | Visually identifying which figure is the architecture diagram and reporting its page+bbox so we can crop it tightly. PyMuPDF text extraction can't tell which figure to crop; you need eyes on the page. |
-| Paper review (full `computer_use` mode, opt-in) | Reading figures, ablation tables, architecture diagrams as visual content for the verdict itself — useful where visual reading materially changes the score. |
-| Miro idea placement (only experimental) | Placing each sticky at the visual midpoint of its source paper circles. Looking at the canvas and clicking where a person would. | 
+| Hero figure capture (`find_figures` step, always on for kept papers) | Scrolling the PDF, visually identifying which figure is the architecture diagram, and reporting its page + bbox so we can crop it tightly with PyMuPDF. There were no direct figure extraction support available. |
+| Paper review (full `computer_use` mode, optional) | Reading figures, ablation tables, architecture diagrams as visual content for the verdict itself — useful where visual reading materially changes the score. |
+| Miro idea placement (only experimental) | Placing each sticky at the visual midpoint of its source paper circles. Looking at the canvas and clicking where a person would. |
 
-CU is **not** used for things APIs do better — arXiv search, the verdict text in default mode (text extraction is enough for the rubric), cross pollinating ideas from paper (pure language), Trello, Miro paper circles + connectors. That separation is the system's design point.
+CU is **not** used for things APIs do better — arXiv search, the review in default mode (text extraction is enough for the rubric), cross pollinating ideas from paper (pure language reasoning), Trello. These design choices where made to optimise the system for cost effectiveness and performance.
 
 ### Idempotency
 
@@ -184,9 +185,8 @@ CU is **not** used for things APIs do better — arXiv search, the verdict text 
 **Known limitations**
 
 - **Miro CU sticky placement fails ~10% of the time** on dense boards — Sidekick popup, coordinate drift after auto-pan, missed double-click. The pipeline silently falls back to REST placement at the layout-computed convergence point, so the board still completes, but the visual narrative ("agent picks the spot") loses fidelity for that idea. While there are existing functions to retrieve the agent from these failure modes, using OPUS shows are tremendous improvement in the ideaboarding task.
-- **`find_figures` occasionally picks the wrong figure** when Figure 1 is a teaser plot and the real architecture is Figure 2. The fallback is a page-1 render, which usually still shows what the reader needs.
-- **Pipeline-mode review latency is bursty.** A single Claude call with 8 viewport screenshots takes 30-120 s on Sonnet, longer on Opus + Bedrock cross-region. The current log doesn't break out per-stage time, so a slow stage feels like a hang.
-- **No automated tests.** Verification is "did the run end with a board?". The pure functions (`compute_layout`, `cost_from_usage`, `arxiv_pdf_url`) are obvious targets for a smoke pytest suite.
+
+- **Lacks rigorous evaluation.** The whole system lacks systematic evaluation of capabilities. I've tested only for a few topics of interested and built a qualitative pipeline.
 
 **Next steps (in priority order)**
 
