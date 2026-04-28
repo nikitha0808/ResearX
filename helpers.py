@@ -5,9 +5,10 @@ What lives here, by category:
   - Backend selection: make_client picks Bedrock or direct Anthropic API.
   - Pricing: cost_from_usage normalizes a usage object into a dollar cost.
   - Image plumbing: as_image_block builds the Anthropic content block.
-  - PDF helpers: arxiv_pdf_url / extract_pdf_text / fetch_and_render_pages /
-    load_paper_in_browser. PyMuPDF + Playwright primitives shared by the
-    reviewer (visual modes), the figure detector, and the text reviewer.
+  - PDF helpers: arxiv_pdf_url / render_page / render_page_crop /
+    extract_pdf_text / fetch_and_render_pages / load_paper_in_browser.
+    PyMuPDF + Playwright primitives shared by the reviewer, the figure
+    extractor, and the text reviewer.
   - Type aliases: Review and UsageRecord, used by reviewer and downstream nodes.
   - Misc: append_jsonl, environment-driven config constants.
 """
@@ -185,6 +186,7 @@ def as_image_block(png_bytes: bytes) -> dict:
 # ── PDF / arXiv helpers ─────────────────────────────────────────────────────
 
 PREVIEW_DPI = int(os.environ.get("PREVIEW_DPI", "130"))
+FIGURE_CROP_DPI = int(os.environ.get("FIGURE_CROP_DPI", "180"))
 
 
 def arxiv_pdf_url(arxiv_id_or_url: str) -> str:
@@ -218,16 +220,15 @@ def render_page_crop(
     pdf_url: str,
     page_index: int,
     bbox_norm: tuple[float, float, float, float],
-    dpi: int = 180,
+    dpi: int = FIGURE_CROP_DPI,
 ) -> bytes | None:
     """Render a sub-region of a PDF page at high DPI.
 
     `bbox_norm` is `(x1, y1, x2, y2)` each in [0,1], where (0,0) is the page's
     top-left and (1,1) the bottom-right. The model identifies the figure's
     location at this normalized scale; we do the pixel math + crop deterministically
-    so the thumbnail matches what the model intended.
-
-    Returns None on invalid bbox, missing page, or PDF download failure.
+    so the thumbnail matches what the model intended. Returns None on invalid
+    bbox, missing page, or PDF download failure.
     """
     if bbox_norm is None or len(bbox_norm) != 4:
         return None
@@ -308,7 +309,7 @@ def load_paper_in_browser(page: Page, pdf_url: str) -> int:
 # ── Misc ────────────────────────────────────────────────────────────────────
 
 def append_jsonl(path: Path, obj: dict) -> None:
-    """Append a JSON line to a file, dropping any bytes-valued keys (e.g. figure_png)."""
+    """Append a JSON line to a file, dropping any bytes-valued keys."""
     safe = {k: v for k, v in obj.items() if not isinstance(v, bytes)}
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as f:

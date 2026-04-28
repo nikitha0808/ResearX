@@ -5,20 +5,21 @@ Flow (LangGraph):
     search_arxiv → review_visual → find_figures → synthesize
                  → post_to_trello → post_to_miro
 
-`find_figures` is a dedicated CU step that runs only on KEEP_TOP survivors
-and only when their review didn't already produce a figure (text mode emits
-no figure; pipeline / computer_use modes ship one as part of submit_review).
+`find_figures` is a dedicated CU step that runs only on KEEP_TOP survivors —
+the agent reads the paper visually, identifies the architecture figure, and
+reports a bbox we crop deterministically with PyMuPDF.
 
 This file owns only the orchestration: how the nodes fit together, the
 per-node logic that pulls inputs/outputs across the graph, and the Trello-list
 polling loop that triggers the pipeline. Domain logic lives in:
 
-  reviewer.py    — paper review (3 modes) + find_hero_figure_cu helper
-  synthesize.py  — cross-paper ideation
-  trello.py      — Trello board / list / card operations
-  miro/          — Miro board posting (CU primary, REST fallback)
-  cu_agent.py    — shared computer-use action infrastructure
-  helpers.py     — shared utilities (client, pricing, PDF rendering, types)
+  reviewer.py     — paper review (3 modes)
+  find_figures.py — post-review CU figure extraction
+  synthesize.py   — cross-paper ideation
+  trello.py       — Trello board / list / card operations
+  miro/           — Miro board posting (CU primary, REST fallback)
+  cu_agent.py     — shared computer-use action infrastructure
+  helpers.py      — shared utilities (client, pricing, PDF rendering, types)
 """
 
 from __future__ import annotations
@@ -49,8 +50,8 @@ from helpers import (  # noqa: E402
 )
 from playwright.sync_api import sync_playwright  # noqa: E402
 from miro import MIRO_BACKEND, MIRO_SESSION_FILE, post_topic_to_miro  # noqa: E402
-from helpers import make_client  # noqa: E402
-from reviewer import find_hero_figure_cu, review_paper  # noqa: E402
+from find_figures import find_main_figure  # noqa: E402
+from reviewer import review_paper  # noqa: E402
 from run_log import run_log  # noqa: E402
 from setup_miro_login import run_miro_login  # noqa: E402
 from synthesize import Idea, synthesize_ideas  # noqa: E402
@@ -92,14 +93,14 @@ class Paper(TypedDict, total=False):
     url: str
     review: Review
     usage: UsageRecord
-    figure_png: bytes  # paper preview (Figure 1 or page-1 render)
+    figure_png: bytes  # main architecture figure crop (set by find_figures)
 
 
 class AgentState(TypedDict, total=False):
     topic: str
     list_id: str
     papers: list[Paper]    # all candidates from arXiv
-    curated: list[Paper]   # post-threshold, enriched with figure
+    curated: list[Paper]   # post-threshold survivors, enriched with figure
     ideas: list[Idea]      # synthesized cross-paper ideas
 
 
@@ -130,12 +131,7 @@ def search_arxiv(state: AgentState) -> AgentState:
 
 
 def review_visual(state: AgentState) -> AgentState:
-    """Per-candidate review via reviewer.review_paper (mode-dispatched).
-
-    The reviewer also returns the paper's preview figure (CU zoom capture in
-    computer_use mode, page render otherwise), which we attach to the paper
-    here so downstream posters can use it as a thumbnail.
-    """
+    """Per-candidate review via reviewer.review_paper (mode-dispatched)."""
     kept: list[Paper] = []
     all_usage: list[UsageRecord] = []
     total_cost = 0.0
@@ -144,7 +140,7 @@ def review_visual(state: AgentState) -> AgentState:
     for i, p in enumerate(state["papers"], 1):
         print(f"\n  [{i}/{len(state['papers'])}] reviewing: {p['title'][:70]}")
         try:
-            review, usage, figure_png = review_paper(
+            review, usage = review_paper(
                 topic=state["topic"],
                 title=p["title"],
                 arxiv_url=p["url"],
@@ -158,8 +154,6 @@ def review_visual(state: AgentState) -> AgentState:
         total_cost += usage["cost_usd"]
 
         scored: Paper = {**p, "review": review, "usage": usage}
-        if figure_png:
-            scored["figure_png"] = figure_png
         accept = (
             review["rating"] >= MIN_RATING
             and review["soundness"] >= MIN_SOUNDNESS
@@ -201,32 +195,26 @@ def review_visual(state: AgentState) -> AgentState:
 
 
 def find_figures(state: AgentState) -> AgentState:
-    """Hero-figure capture for kept papers — runs only on KEEP_TOP survivors.
+    """CU figure extraction for kept papers — runs only on KEEP_TOP survivors.
 
-    A separate, visible step in the pipeline so CU's role is unambiguous: look
-    at the paper visually, identify the architecture diagram, and report a
-    bbox we can crop from. Skipped when:
-      - FIND_FIGURES_ENABLED=0
-      - the paper already has a figure (pipeline / computer_use review modes
-        ship a bbox-cropped figure as part of submit_review).
+    Skipped when FIND_FIGURES_ENABLED=0 or no papers cleared the review
+    threshold. Per-paper failures are logged and don't abort the pipeline; the
+    paper just ships without a figure thumbnail.
     """
     if not FIND_FIGURES_ENABLED:
         return {}
     curated = state.get("curated", [])
-    needs_figure = [p for p in curated if not p.get("figure_png")]
-    if not needs_figure:
+    if not curated:
         return {}
 
-    print(f"\n  finding hero figures for {len(needs_figure)} paper(s) via CU…")
-    client = make_client()
+    print(f"\n  finding main figure for {len(curated)} paper(s) via CU…")
     total_cost = 0.0
     t_start = time.time()
 
-    for i, p in enumerate(needs_figure, 1):
-        title_short = p["title"][:60]
-        print(f"  [{i}/{len(needs_figure)}] hero figure: {title_short}")
+    for i, p in enumerate(curated, 1):
+        print(f"  [{i}/{len(curated)}] figure: {p['title'][:60]}")
         try:
-            figure_png, fig_usage = find_hero_figure_cu(client, p["url"])
+            figure_png, fig_usage = find_main_figure(p["url"])
         except Exception as e:
             print(f"    ! figure capture failed ({type(e).__name__}): {e}")
             continue
@@ -234,7 +222,7 @@ def find_figures(state: AgentState) -> AgentState:
             p["figure_png"] = figure_png
         total_cost += fig_usage["cost_usd"]
         print(
-            f"    figure {'captured' if figure_png else 'unavailable'} "
+            f"    {'captured' if figure_png else 'unavailable'} "
             f"(${fig_usage['cost_usd']:.3f}, {fig_usage['seconds']:.0f}s, "
             f"{fig_usage['screenshots']} screenshots)"
         )

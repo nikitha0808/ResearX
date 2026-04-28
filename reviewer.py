@@ -6,8 +6,7 @@ Three modes (REVIEWER_MODE):
                    PDF gallery in Chromium. Claude scrolls / zooms / inspects
                    figures and tables, then submits a NeurIPS-style review.
   - pipeline     : Take N upfront viewport screenshots, send them all in one
-                   Claude call, then a small CU sub-loop crops the architecture
-                   figure tightly. Cheapest visual mode.
+                   Claude call. Cheapest visual mode.
   - text         : PyMuPDF text extraction, single Claude call. No vision, no
                    browser. Useful as a baseline and for cost-conscious runs.
 
@@ -40,22 +39,12 @@ from helpers import (
     extract_pdf_text,
     load_paper_in_browser,
     make_client,
-    render_page,
-    render_page_crop,
     shared_or_fresh_page,
 )
 from playwright.sync_api import Page
 
 REVIEWER_MODE = os.environ.get("REVIEWER_MODE", "pipeline")
-# pipeline     : N upfront screenshots in one Claude call (default);
-#                submit_review returns the figure bbox.
-# computer_use : full CU agent reads the PDF visually end-to-end; also
-#                returns the figure bbox in submit_review.
-# text         : PyMuPDF text extraction, single Claude call, no vision.
-#                Hero figure is captured by the separate `find_figures`
-#                pipeline step, not here.
 MAX_SCREENSHOTS = int(os.environ.get("MAX_SCREENSHOTS", "8"))
-FIGURE_FINDER_MAX_STEPS = int(os.environ.get("FIGURE_FINDER_MAX_STEPS", "6"))
 
 # Per-callsite model. Falls back to CLAUDE_MODEL (helpers.py) so existing
 # setups that only set CLAUDE_MODEL still work. Override via REVIEWER_MODEL
@@ -95,24 +84,6 @@ not keep scrolling or zooming past what you need; the structured review matters
 more than complete coverage. As soon as you have a confident verdict, call
 submit_review immediately.
 
-FIGURE PREVIEW: While reading, identify the main architecture / method figure
-(usually Figure 1; sometimes Figure 2 if Figure 1 is a teaser plot). In
-submit_review, pass:
-
-  - `figure_page_index`: 0-indexed PDF page where the figure lives.
-  - `figure_bbox_normalized`: [x1, y1, x2, y2] each in [0,1] giving the
-    figure's bounding box ON THAT PAGE (0,0 = top-left of the page). Include
-    the caption directly below the figure inside the box.
-
-The system renders the page at high DPI and crops to your bbox to produce a
-clean thumbnail — you don't need to use the `zoom` action for this. Be
-generous with the bbox: err toward including a bit too much margin rather
-than clipping. The most common failure mode is setting y2 too low and cutting
-off the bottom of a tall architecture diagram.
-
-If the paper has no clear architecture/method figure (pure-theory paper,
-survey, etc.), omit figure_bbox_normalized and just pass figure_page_index=0.
-
 You MUST call the submit_review tool to return your judgment. Do not answer in prose."""
 
 
@@ -144,9 +115,6 @@ Scoring rubric:
   - rating (1-10): overall. 1-3=reject, 4-5=borderline, 6-7=weak accept, 8-10=strong accept.
   - confidence (1-5): How confident you are in your judgment.
 
-You will not see figures — just pass `figure_page_index=0` in submit_review;
-the system renders page 1 as a fallback thumbnail.
-
 You MUST call the submit_review tool to return your judgment. Do not answer in prose."""
 
 
@@ -165,119 +133,10 @@ SUBMIT_REVIEW_TOOL = {
             "rating": {"type": "integer", "minimum": 1, "maximum": 10},
             "confidence": {"type": "integer", "minimum": 1, "maximum": 5},
             "rationale": {"type": "string", "description": "One paragraph summarizing the judgment."},
-            "figure_page_index": {
-                "type": "integer",
-                "minimum": 0,
-                "description": "0-indexed PDF page where the main architecture/method figure appears.",
-            },
-            "figure_bbox_normalized": {
-                "type": "array",
-                "description": (
-                    "Bounding box of the main architecture figure ON THE PAGE referenced by figure_page_index, "
-                    "given as [x1, y1, x2, y2] each in [0,1] (0,0 = top-left of the page; 1,1 = bottom-right). "
-                    "Include the figure's caption directly underneath in the box. "
-                    "Be generous — err toward including a bit too much rather than clipping. "
-                    "If the paper has no clear architecture figure, omit this field."
-                ),
-                "items": {"type": "number", "minimum": 0, "maximum": 1},
-                "minItems": 4,
-                "maxItems": 4,
-            },
         },
         "required": ["summary", "strengths", "weaknesses", "soundness", "presentation", "contribution", "rating", "confidence", "rationale"],
     },
 }
-
-
-# ── Figure-finder tool (used by text_with_figure mode) ─────────────────────
-
-REPORT_FIGURE_TOOL = {
-    "name": "report_figure",
-    "description": "Report the location of the paper's main architecture/method figure (usually Figure 1).",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "figure_page_index": {
-                "type": "integer",
-                "minimum": 0,
-                "description": "0-indexed PDF page where the figure lives.",
-            },
-            "figure_bbox_normalized": {
-                "type": "array",
-                "description": (
-                    "Bounding box [x1, y1, x2, y2] each in [0,1] on the page identified by "
-                    "figure_page_index (0,0 = top-left). Include the caption directly below "
-                    "the figure. Be generous — err toward more margin rather than clipping."
-                ),
-                "items": {"type": "number", "minimum": 0, "maximum": 1},
-                "minItems": 4,
-                "maxItems": 4,
-            },
-        },
-        "required": ["figure_page_index"],
-    },
-}
-
-
-FIND_FIGURE_SYSTEM = """You are locating ONE figure in a research paper — the main architecture or method diagram (usually Figure 1; sometimes Figure 2 if Figure 1 is just a teaser plot).
-
-The paper is rendered as a vertical scrollable gallery in your browser. Scroll through the first few pages, identify the architecture figure, and call report_figure with its page index and bounding box.
-
-  - figure_page_index: 0-indexed PDF page where the figure lives.
-  - figure_bbox_normalized: [x1, y1, x2, y2] each in [0,1] on that page.
-    Include the caption directly below. Err toward more margin than clipping.
-
-If the paper has no clear architecture figure (pure-theory paper, survey),
-call report_figure with figure_page_index=0 and omit figure_bbox_normalized.
-
-BUDGET: ~6 turns. Call report_figure as soon as you've found it. Do NOT
-write a review — figure-finding is your only job here.
-
-You MUST call report_figure to exit. Do not answer in prose."""
-
-
-def finalize_figure(
-    pdf_url: str,
-    fig_page: int,
-    bbox_norm: list[float] | tuple[float, float, float, float] | None = None,
-    zoom_png: bytes | None = None,
-) -> bytes | None:
-    """Pick the figure_png. Priority order:
-
-      1. If `bbox_norm` is provided and valid, render+crop the page at high DPI
-         using PyMuPDF — this is the most accurate path because we control
-         rendering and the model only had to identify *where on the page*.
-      2. Else if `zoom_png` is provided and is plausibly a real crop (≥ 400×400),
-         use it. Kept for backward compat with CU `zoom` action captures.
-      3. Else render the full page as a fallback thumbnail.
-    """
-    import struct as _struct
-
-    if bbox_norm is not None:
-        cropped = render_page_crop(pdf_url, fig_page, tuple(bbox_norm))
-        if cropped is not None:
-            try:
-                cw, ch = _struct.unpack(">II", cropped[16:24])
-            except Exception:
-                cw = ch = 0
-            print(f"    figure: bbox crop {cw}x{ch} ({len(cropped)} bytes, page {fig_page}, bbox {tuple(bbox_norm)})")
-            return cropped
-        print(f"    figure: bbox crop failed (page {fig_page}, bbox {tuple(bbox_norm)}) — trying fallbacks")
-
-    MIN_W, MIN_H = 400, 400
-    if zoom_png is not None:
-        try:
-            zw, zh = _struct.unpack(">II", zoom_png[16:24])
-        except Exception:
-            zw = zh = 0
-        if zw >= MIN_W and zh >= MIN_H:
-            print(f"    figure: zoom capture {zw}x{zh} ({len(zoom_png)} bytes, page {fig_page})")
-            return zoom_png
-        print(f"    figure: zoom capture {zw}x{zh} too small (<{MIN_W}x{MIN_H})")
-
-    rendered = render_page(pdf_url, page_index=fig_page)
-    print(f"    figure: page-{fig_page} full render ({len(rendered) if rendered else 0} bytes)")
-    return rendered
 
 
 # ── Mode 1: pipeline ────────────────────────────────────────────────────────
@@ -291,7 +150,7 @@ def capture_screenshots_pipeline(page: Page, max_shots: int) -> list[bytes]:
     return shots
 
 
-def review_pipeline(client: Anthropic, topic: str, title: str, abstract: str, pdf_url: str) -> tuple[Review, UsageRecord, bytes | None]:
+def review_pipeline(client: Anthropic, topic: str, title: str, abstract: str, pdf_url: str) -> tuple[Review, UsageRecord]:
     t0 = time.time()
     with shared_or_fresh_page(viewport={"width": 1280, "height": 1600}) as page:
         n_pages = load_paper_in_browser(page, pdf_url)
@@ -326,11 +185,6 @@ def review_pipeline(client: Anthropic, topic: str, title: str, abstract: str, pd
         if review is None:
             raise RuntimeError(f"Model did not call submit_review. stop_reason={resp.stop_reason}")
 
-    # Crop the architecture figure deterministically using the bbox the model
-    # reported in submit_review. No second Claude call needed.
-    fig_page = int(review.get("figure_page_index", 0) or 0)
-    figure_png = finalize_figure(pdf_url, fig_page, bbox_norm=review.get("figure_bbox_normalized"))
-
     usage: UsageRecord = {
         "input_tokens": resp.usage.input_tokens,
         "output_tokens": resp.usage.output_tokens,
@@ -340,12 +194,12 @@ def review_pipeline(client: Anthropic, topic: str, title: str, abstract: str, pd
         "seconds": time.time() - t0,
         "screenshots": len(shots),
     }
-    return review, usage, figure_png
+    return review, usage
 
 
 # ── Mode 2: computer_use (Anthropic computer_20251124) ─────────────────────
 
-def review_computer_use(client, topic: str, title: str, abstract: str, pdf_url: str) -> tuple[Review, UsageRecord, bytes | None]:
+def review_computer_use(client, topic: str, title: str, abstract: str, pdf_url: str) -> tuple[Review, UsageRecord]:
     """Agent-loop variant using Anthropic's official computer_20251124 tool.
 
     Same API surface as the official Docker reference implementation; differs
@@ -354,7 +208,6 @@ def review_computer_use(client, topic: str, title: str, abstract: str, pdf_url: 
     t0 = time.time()
     totals = {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0, "shots": 0}
     step = 0
-    last_zoom_png: bytes | None = None
 
     with shared_or_fresh_page(viewport={"width": CU_DISPLAY_WIDTH, "height": CU_DISPLAY_HEIGHT}) as page:
         load_paper_in_browser(page, pdf_url)
@@ -375,10 +228,7 @@ def review_computer_use(client, topic: str, title: str, abstract: str, pdf_url: 
                         f"Use the computer tool to read it: scroll down to see more pages, press Page_Down for "
                         f"page-by-page navigation, or call zoom on a specific figure/table region (with [x1,y1,x2,y2]) "
                         f"to read it at full resolution. Examine figures, tables, and ablation studies — that's the "
-                        f"whole point of reviewing visually. When you reach the main architecture / method figure "
-                        f"(usually Figure 1), call zoom once with a tight bounding box around it — that capture "
-                        f"becomes the paper's preview thumbnail. Then continue and call submit_review with your "
-                        f"verdict and `figure_page_index` set to the page where that figure lives."
+                        f"whole point of reviewing visually. When you have a confident verdict, call submit_review."
                     ),
                 },
                 as_image_block(first_png),
@@ -424,8 +274,6 @@ def review_computer_use(client, topic: str, title: str, abstract: str, pdf_url: 
                 elif block.name == "computer":
                     png, is_error = execute_cu_action(page, block.input)
                     totals["shots"] += 1
-                    if block.input.get("action") == "zoom" and not is_error:
-                        last_zoom_png = png
                     content_blocks: list[dict] = []
                     hint = budget_hint(step, AGENT_MAX_STEPS)
                     if hint:
@@ -455,19 +303,12 @@ def review_computer_use(client, topic: str, title: str, abstract: str, pdf_url: 
         "seconds": time.time() - t0,
         "screenshots": totals["shots"],
     }
-    fig_page = int(review.get("figure_page_index", 0) or 0)
-    figure_png = finalize_figure(
-        pdf_url,
-        fig_page,
-        bbox_norm=review.get("figure_bbox_normalized"),
-        zoom_png=last_zoom_png,
-    )
-    return review, usage, figure_png
+    return review, usage
 
 
 # ── Mode 3: text-only (no vision, no browser) ──────────────────────────────
 
-def review_text_only(client, topic: str, title: str, abstract: str, pdf_url: str) -> tuple[Review, UsageRecord, bytes | None]:
+def review_text_only(client, topic: str, title: str, abstract: str, pdf_url: str) -> tuple[Review, UsageRecord]:
     """Text-only review: extract paper text via PyMuPDF, no images, single Claude call.
 
     Useful as the cheapest mode and as a baseline for the "what does visual
@@ -506,130 +347,13 @@ def review_text_only(client, topic: str, title: str, abstract: str, pdf_url: str
         "seconds": time.time() - t0,
         "screenshots": 0,
     }
-    # Text-only mode produces no figure here. The separate find_figures
-    # pipeline step in main.py runs the CU figure-finder on kept papers.
-    return review, usage, None
-
-
-# ── Public: CU sub-loop for hero-figure capture (used by main.py) ──────────
-
-def find_hero_figure_cu(client, pdf_url: str) -> tuple[bytes | None, UsageRecord]:
-    """CU sub-loop that locates a paper's main architecture figure and returns
-    a high-DPI crop of it. Used by text_with_figure mode so the cheap text
-    review can still ship with a real figure thumbnail.
-
-    Bounded to FIGURE_FINDER_MAX_STEPS turns. The agent is given a single goal
-    tool (report_figure) — it scrolls the PDF gallery, identifies the figure,
-    and returns its page index + normalized bbox. The crop is then produced
-    deterministically by render_page_crop, same as in pipeline / CU modes.
-    """
-    t0 = time.time()
-    totals = {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0, "shots": 0}
-    figure_info: dict | None = None
-
-    with shared_or_fresh_page(viewport={"width": CU_DISPLAY_WIDTH, "height": CU_DISPLAY_HEIGHT}) as page:
-        load_paper_in_browser(page, pdf_url)
-        first_png = page.screenshot(full_page=False)
-        totals["shots"] += 1
-
-        cu_tool = cu_tool_spec()
-
-        messages: list[dict] = [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": (
-                    "Find the paper's main architecture / method figure. The paper is "
-                    "rendered as a scrollable gallery below. Scroll through the first few "
-                    "pages, identify the architecture figure (usually Figure 1), then call "
-                    "report_figure with its page index and bounding box."
-                )},
-                as_image_block(first_png),
-            ],
-        }]
-
-        for step in range(FIGURE_FINDER_MAX_STEPS):
-            # In the final 2 turns, drop the CU tool so the model is forced to
-            # call report_figure. Same hard-stop pattern as review_computer_use.
-            final_turns = step >= FIGURE_FINDER_MAX_STEPS - 2
-            tools_for_step = [REPORT_FIGURE_TOOL] if final_turns else [cu_tool, REPORT_FIGURE_TOOL]
-
-            resp = client.beta.messages.create(
-                model=REVIEWER_MODEL,
-                max_tokens=1000,
-                system=[{"type": "text", "text": FIND_FIGURE_SYSTEM, "cache_control": {"type": "ephemeral"}}],
-                tools=tools_for_step,
-                messages=messages,
-                betas=[COMPUTER_USE_BETA],
-            )
-            totals["in"] += resp.usage.input_tokens
-            totals["out"] += resp.usage.output_tokens
-            totals["cr"] += getattr(resp.usage, "cache_read_input_tokens", 0) or 0
-            totals["cw"] += getattr(resp.usage, "cache_creation_input_tokens", 0) or 0
-            totals["cost"] += cost_from_usage(REVIEWER_MODEL, resp.usage)
-
-            tool_uses = [b for b in resp.content if b.type == "tool_use"]
-            if not tool_uses:
-                break
-
-            messages.append({"role": "assistant", "content": resp.content})
-
-            tool_results: list[dict] = []
-            for block in tool_uses:
-                if block.name == "report_figure":
-                    figure_info = block.input
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": "Figure recorded. Session ending.",
-                    })
-                elif block.name == "computer":
-                    png, is_error = execute_cu_action(page, block.input)
-                    totals["shots"] += 1
-                    content_blocks: list[dict] = []
-                    if is_error:
-                        content_blocks.append({"type": "text", "text": "(action errored; current state below)"})
-                    content_blocks.append(as_image_block(png))
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": content_blocks,
-                    })
-
-            messages.append({"role": "user", "content": tool_results})
-
-            if figure_info is not None:
-                break
-
-    usage: UsageRecord = {
-        "input_tokens": totals["in"],
-        "output_tokens": totals["out"],
-        "cache_read_tokens": totals["cr"],
-        "cache_write_tokens": totals["cw"],
-        "cost_usd": totals["cost"],
-        "seconds": time.time() - t0,
-        "screenshots": totals["shots"],
-    }
-
-    if figure_info is None:
-        # Agent never reported a figure — fall back to page-1 render so the
-        # paper still gets a thumbnail, just not a tight crop.
-        return render_page(pdf_url, page_index=0), usage
-
-    fig_page = int(figure_info.get("figure_page_index", 0) or 0)
-    figure_png = finalize_figure(pdf_url, fig_page, bbox_norm=figure_info.get("figure_bbox_normalized"))
-    return figure_png, usage
+    return review, usage
 
 
 # ── Dispatcher ─────────────────────────────────────────────────────────────
 
-def review_paper(topic: str, title: str, arxiv_url: str, abstract: str) -> tuple[Review, UsageRecord, bytes | None]:
-    """Produce a structured review of one paper. Strategy is chosen by REVIEWER_MODE.
-
-    Returns (review, usage, figure_png_or_None). Text mode always returns
-    figure_png=None — the separate find_figures pipeline step handles hero
-    figure capture. Pipeline / computer_use modes still bundle the figure
-    bbox into submit_review so they return a real crop here for free.
-    """
+def review_paper(topic: str, title: str, arxiv_url: str, abstract: str) -> tuple[Review, UsageRecord]:
+    """Produce a structured review of one paper. Strategy is chosen by REVIEWER_MODE."""
     client = make_client()
     pdf_url = arxiv_pdf_url(arxiv_url)
     if REVIEWER_MODE == "computer_use":
@@ -644,31 +368,22 @@ def review_paper(topic: str, title: str, arxiv_url: str, abstract: str) -> tuple
 if __name__ == "__main__":
     import json
     import sys
-    from pathlib import Path
 
     from dotenv import load_dotenv
 
     load_dotenv()
 
     if len(sys.argv) < 2:
-        print("Usage: python reviewer.py <arxiv_id_or_url> [topic] [figure_out.png]")
+        print("Usage: python reviewer.py <arxiv_id_or_url> [topic]")
         sys.exit(1)
 
     arxiv_ref = sys.argv[1]
     topic = sys.argv[2] if len(sys.argv) > 2 else "general machine learning"
-    figure_out = Path(sys.argv[3]) if len(sys.argv) > 3 else Path("/tmp/review_figure.png")
 
-    review, usage, figure_png = review_paper(
+    review, usage = review_paper(
         topic=topic,
         title="(fetched from arxiv via smoke-test)",
         arxiv_url=arxiv_ref,
         abstract="(abstract not provided in smoke test — reviewer should read the paper itself)",
     )
-    if figure_png:
-        figure_out.write_bytes(figure_png)
-    print(json.dumps({
-        "review": review,
-        "usage": usage,
-        "figure_png_bytes": len(figure_png) if figure_png else 0,
-        "figure_path": str(figure_out) if figure_png else None,
-    }, indent=2, default=str))
+    print(json.dumps({"review": review, "usage": usage}, indent=2, default=str))

@@ -101,8 +101,8 @@ def save_seen(seen: set[str]) -> None:
 def post_paper_card(list_id: str, paper: dict) -> str:
     """Create a paper card with full review-form description.
 
-    If paper has a `figure_png` (bytes), it's attached as the card cover. Returns
-    the new card's Trello ID.
+    If `paper["figure_png"]` is set (bytes), it's attached as the card cover.
+    Returns the new card's Trello ID.
     """
     r = paper["review"]
     desc = (
